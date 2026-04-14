@@ -2,7 +2,7 @@
 
 import { Suspense, useState } from "react"
 import { signIn } from "next-auth/react"
-import { useRouter, useSearchParams } from "next/navigation"
+import { useSearchParams } from "next/navigation"
 import { useForm } from "react-hook-form"
 import { zodResolver } from "@hookform/resolvers/zod"
 import { z } from "zod"
@@ -25,10 +25,12 @@ const loginSchema = z.object({
 type LoginFormData = z.infer<typeof loginSchema>
 
 function LoginForm() {
-  const router = useRouter()
   const searchParams = useSearchParams()
   const callbackUrl = searchParams.get("callbackUrl") || "/chat"
-  const [error, setError] = useState<string | null>(null)
+  const urlError = searchParams.get("error")
+  const [error, setError] = useState<string | null>(
+    urlError ? "Invalid email or password. Please try again." : null
+  )
   const [isLoading, setIsLoading] = useState(false)
   const [isOAuthLoading, setIsOAuthLoading] = useState<string | null>(null)
   const [showPassword, setShowPassword] = useState(false)
@@ -45,38 +47,18 @@ function LoginForm() {
     setError(null)
     setIsLoading(true)
 
-    try {
-      const result = await signIn("credentials", {
-        email: data.email,
-        password: data.password,
-        redirect: false,
-      })
-
-      if (result?.error) {
-        setError("Invalid email or password. Please try again.")
-        setIsLoading(false)
-        return
-      }
-
-      // Full page reload to ensure cookie is available for middleware
-      window.location.href = callbackUrl
-    } catch {
-      setError("Something went wrong. Please try again.")
-    } finally {
-      setIsLoading(false)
-    }
+    await signIn("credentials", {
+      email: data.email,
+      password: data.password,
+      callbackUrl,
+    })
   }
 
   async function handleOAuthSignIn(provider: string) {
     setIsOAuthLoading(provider)
     setError(null)
 
-    try {
-      await signIn(provider, { callbackUrl })
-    } catch {
-      setError("OAuth sign-in failed. Please try again.")
-      setIsOAuthLoading(null)
-    }
+    await signIn(provider, { callbackUrl })
   }
 
   return (
