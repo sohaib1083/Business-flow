@@ -54,11 +54,12 @@ function LoginForm() {
 
       if (result?.error) {
         setError("Invalid email or password. Please try again.")
+        setIsLoading(false)
         return
       }
 
-      router.push(callbackUrl)
-      router.refresh()
+      // Full page reload to ensure cookie is available for middleware
+      window.location.href = callbackUrl
     } catch {
       setError("Something went wrong. Please try again.")
     } finally {
