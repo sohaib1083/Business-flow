@@ -1,6 +1,7 @@
 import mongoose from 'mongoose'
-import { ObjectId } from 'mongodb'
 import type { MongoCredentials, SchemaInfo } from '@/types/connection'
+
+const ObjectId = mongoose.Types.ObjectId
 
 const SAMPLE_SIZE = 100
 const MAX_DOCS = 10000

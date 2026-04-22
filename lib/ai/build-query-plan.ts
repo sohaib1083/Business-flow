@@ -1,158 +1,97 @@
-import Anthropic from '@anthropic-ai/sdk'
+import { groqComplete, parseJsonLoose } from './groq'
 import { buildQueryPlanPrompt } from './prompts'
 import type { QueryPlan } from '@/types/query'
+import type { SchemaInfo, ConnectionType } from '@/types/connection'
 
-const anthropic = new Anthropic({
-  apiKey: process.env.ANTHROPIC_API_KEY,
-})
+const VALID_INTENTS: QueryPlan['intent'][] = [
+  'aggregate',
+  'filter',
+  'group',
+  'timeseries',
+  'ranking',
+  'detail',
+]
 
-const MAX_RETRIES = 2
+const VALID_SOURCES: QueryPlan['sourceType'][] = [
+  'postgres',
+  'mysql',
+  'csv',
+  'excel',
+  'mongodb',
+]
 
-function parseQueryPlan(raw: string): QueryPlan {
-  let cleaned = raw.trim()
+function normalizePlan(raw: unknown, connectionType: string): QueryPlan {
+  const parsed = (raw ?? {}) as Record<string, unknown>
 
-  if (cleaned.startsWith('```json')) {
-    cleaned = cleaned.slice(7)
-  } else if (cleaned.startsWith('```')) {
-    cleaned = cleaned.slice(3)
-  }
-  if (cleaned.endsWith('```')) {
-    cleaned = cleaned.slice(0, -3)
-  }
-  cleaned = cleaned.trim()
+  const sourceType = (
+    VALID_SOURCES.includes(parsed.sourceType as QueryPlan['sourceType'])
+      ? parsed.sourceType
+      : VALID_SOURCES.includes(connectionType as QueryPlan['sourceType'])
+        ? connectionType
+        : 'postgres'
+  ) as QueryPlan['sourceType']
 
-  const parsed = JSON.parse(cleaned)
+  const intent = (
+    VALID_INTENTS.includes(parsed.intent as QueryPlan['intent'])
+      ? parsed.intent
+      : 'detail'
+  ) as QueryPlan['intent']
 
-  if (!parsed.sourceType || !parsed.intent) {
-    throw new Error('QueryPlan missing required fields: sourceType and intent')
-  }
-
-  const validIntents: QueryPlan['intent'][] = [
-    'aggregate',
-    'filter',
-    'group',
-    'timeseries',
-    'ranking',
-    'detail',
-  ]
-  if (!validIntents.includes(parsed.intent)) {
-    parsed.intent = 'detail'
-  }
-
-  const validSourceTypes: QueryPlan['sourceType'][] = [
-    'postgres',
-    'mysql',
-    'csv',
-    'excel',
-    'mongodb',
-  ]
-  if (!validSourceTypes.includes(parsed.sourceType)) {
-    parsed.sourceType = 'postgres'
+  const plan: QueryPlan = {
+    sourceType,
+    intent,
+    entities: Array.isArray(parsed.entities) ? (parsed.entities as string[]) : [],
+    fields: Array.isArray(parsed.fields) ? (parsed.fields as QueryPlan['fields']) : [],
+    filters: Array.isArray(parsed.filters) ? (parsed.filters as QueryPlan['filters']) : [],
   }
 
-  if (!Array.isArray(parsed.entities)) {
-    parsed.entities = []
-  }
-  if (!Array.isArray(parsed.fields)) {
-    parsed.fields = []
-  }
-  if (!Array.isArray(parsed.filters)) {
-    parsed.filters = []
-  }
-  if (parsed.groupBy !== undefined && !Array.isArray(parsed.groupBy)) {
-    parsed.groupBy = undefined
-  }
-  if (parsed.orderBy !== undefined && !Array.isArray(parsed.orderBy)) {
-    parsed.orderBy = undefined
-  }
-  if (parsed.limit !== undefined && typeof parsed.limit !== 'number') {
-    parsed.limit = 100
-  }
-  if (parsed.limit && parsed.limit > 1000) {
-    parsed.limit = 1000
-  }
-
-  return parsed as QueryPlan
-}
-
-export async function buildQueryPlan(params: {
-  question: string
-  schema: string
-  connectionType: string
-  glossary?: string
-}): Promise<QueryPlan> {
-  const { question, schema, connectionType, glossary } = params
-
-  const systemPrompt = buildQueryPlanPrompt(
-    schema,
-    question,
-    connectionType
-  )
-
-  const enhancedSchema = glossary
-    ? `${schema}\n\n## BUSINESS GLOSSARY\n${glossary}`
-    : schema
-
-  let lastError: Error | null = null
-
-  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
-    try {
-      const response = await anthropic.messages.create({
-        model: 'claude-sonnet-4-20250514',
-        max_tokens: 2048,
-        temperature: 0,
-        system: systemPrompt,
-        messages: [
-          {
-            role: 'user',
-            content: enhancedSchema
-              ? `User question: "${question}"\n\nAvailable schema:\n${enhancedSchema}`
-              : `User question: "${question}"`,
-          },
-        ],
-      })
-
-      const textBlock = response.content.find(
-        (block): block is Anthropic.TextBlock => block.type === 'text'
-      )
-
-      if (!textBlock || !textBlock.text) {
-        throw new Error('No text content in Claude response')
-      }
-
-      return parseQueryPlan(textBlock.text)
-    } catch (error) {
-      lastError = error as Error
-
-      if (error instanceof SyntaxError) {
-        if (attempt < MAX_RETRIES) {
-          continue
-        }
-      }
-
-      if (
-        error instanceof Anthropic.APIError &&
-        error.status &&
-        error.status >= 500
-      ) {
-        if (attempt < MAX_RETRIES) {
-          continue
-        }
-      }
-
-      if (attempt >= MAX_RETRIES) {
-        break
+  if (Array.isArray(parsed.groupBy)) plan.groupBy = parsed.groupBy as string[]
+  if (Array.isArray(parsed.orderBy)) plan.orderBy = parsed.orderBy as QueryPlan['orderBy']
+  if (typeof parsed.limit === 'number') plan.limit = Math.min(parsed.limit, 1000)
+  if (Array.isArray(parsed.joins)) plan.joins = parsed.joins as QueryPlan['joins']
+  if (parsed.timeBucket && typeof parsed.timeBucket === 'object') {
+    const tb = parsed.timeBucket as { field?: string; unit?: string; alias?: string }
+    if (tb.field && tb.unit) {
+      const unit = tb.unit.toLowerCase() as NonNullable<QueryPlan['timeBucket']>['unit']
+      if (['day', 'week', 'month', 'quarter', 'year'].includes(unit)) {
+        plan.timeBucket = { field: tb.field, unit, alias: tb.alias }
       }
     }
   }
 
-  return {
-    sourceType: (['postgres', 'mysql', 'csv', 'excel'].includes(connectionType)
-      ? connectionType
-      : 'postgres') as QueryPlan['sourceType'],
-    intent: 'detail',
-    entities: [],
-    fields: [],
-    filters: [],
+  return plan
+}
+
+export async function buildQueryPlan(
+  question: string,
+  schema: SchemaInfo,
+  connectionType: ConnectionType,
+  glossary?: string | null,
+): Promise<QueryPlan> {
+  const system = buildQueryPlanPrompt(schema, connectionType)
+  const userContent = glossary
+    ? `Question: "${question}"\n\nBusiness glossary:\n${glossary}`
+    : `Question: "${question}"`
+
+  try {
+    const raw = await groqComplete({
+      messages: [
+        { role: 'system', content: system },
+        { role: 'user', content: userContent },
+      ],
+      temperature: 0,
+      maxTokens: 1024,
+      json: true,
+    })
+    return normalizePlan(parseJsonLoose(raw), connectionType)
+  } catch {
+    const fallback = connectionType.toLowerCase() as QueryPlan['sourceType']
+    return {
+      sourceType: VALID_SOURCES.includes(fallback) ? fallback : 'postgres',
+      intent: 'detail',
+      entities: [],
+      fields: [],
+      filters: [],
+    }
   }
 }

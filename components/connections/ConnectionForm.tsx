@@ -4,6 +4,7 @@ import * as React from 'react'
 import { useForm, Controller } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { z } from 'zod'
+import { apiFetch } from '@/lib/store/chat-store'
 import {
   Dialog,
   DialogContent,
@@ -185,49 +186,24 @@ export function ConnectionForm({
   const handleTest = async () => {
     setIsTesting(true)
     setTestResult(null)
-
     try {
       const formData = form.getValues()
-
       if (formData.type === 'CSV' || formData.type === 'EXCEL') {
-        setTestResult({ success: !!selectedFile, message: selectedFile ? 'File ready for upload' : 'Please select a file first' })
+        setTestResult({
+          success: !!selectedFile,
+          message: selectedFile ? 'File ready for upload' : 'Please select a file first',
+        })
         return
       }
-
-      const payload: Record<string, unknown> = {
-        name: formData.name,
-        type: formData.type,
-        credentials: buildCredentialsPayload(formData),
-      }
-
-      const response = await fetch('/api/connections', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-      })
-
-      const data = await response.json()
-
-      if (response.ok && data.testResult) {
-        setTestResult(data.testResult)
-        if (data.connection?.id) {
-          await fetch(`/api/connections/${data.connection.id}`, { method: 'DELETE' })
-        }
-      } else if (data.testResult) {
-        setTestResult(data.testResult)
-        if (data.connection?.id) {
-          await fetch(`/api/connections/${data.connection.id}`, { method: 'DELETE' })
-        }
-      } else {
-        setTestResult({
-          success: false,
-          message: data.error || 'Test failed with an unknown error',
-        })
-      }
-    } catch (error) {
+      // Validate the form client-side; the real credential test happens when
+      // the connection is saved (the POST /api/connections endpoint tests
+      // credentials before persisting).
+      const valid = await form.trigger()
       setTestResult({
-        success: false,
-        message: error instanceof Error ? error.message : 'Network error during test',
+        success: valid,
+        message: valid
+          ? 'Looks valid — click Save to verify the credentials.'
+          : 'Please fix the form errors first.',
       })
     } finally {
       setIsTesting(false)
@@ -269,7 +245,7 @@ export function ConnectionForm({
           formData.append('name', data.name)
           formData.append('type', data.type)
 
-          const response = await fetch('/api/upload', {
+          const response = await apiFetch('/api/upload', {
             method: 'POST',
             body: formData,
           })

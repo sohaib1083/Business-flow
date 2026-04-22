@@ -1,146 +1,85 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { auth } from '@/lib/auth'
-import { prisma } from '@/lib/prisma'
-import { uploadFile, validateFileType, getMaxFileSize } from '@/lib/files/upload'
-import { parseCSV, parseExcel, buildSchemaFromParsedFile, createTempTable } from '@/lib/db/connectors/file-tabular'
+import { requireUser, isAuthResponse } from '@/lib/firebase/api-auth'
+import { createConnection } from '@/lib/data/repos'
+import {
+  buildFileSchema,
+  parseFile,
+} from '@/lib/db/connectors/file-tabular'
+import {
+  maxFileBytes,
+  uploadBuffer,
+  validateFileType,
+} from '@/lib/files/storage'
 
 export const dynamic = 'force-dynamic'
 
-export async function POST(request: NextRequest) {
-  try {
-    const session = await auth()
-    if (!session?.user?.id) {
-      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
-    }
+export async function POST(req: NextRequest) {
+  const auth = await requireUser(req)
+  if (isAuthResponse(auth)) return auth
 
-    const workspaceId = session.user.workspaceId
-    if (!workspaceId) {
-      return NextResponse.json({ error: 'No active workspace' }, { status: 400 })
-    }
+  const form = await req.formData()
+  const file = form.get('file') as File | null
+  const name = (form.get('name') as string | null) ?? null
+  if (!file) return NextResponse.json({ error: 'No file provided' }, { status: 400 })
 
-    const membership = await prisma.workspaceMember.findFirst({
-      where: { workspaceId, userId: session.user.id },
-      select: { role: true, workspace: { select: { plan: true } } },
-    })
+  const typeCheck = validateFileType(file.name)
+  if (!typeCheck.valid || !typeCheck.type) {
+    return NextResponse.json({ error: 'Only CSV or Excel files are supported.' }, { status: 400 })
+  }
 
-    if (!membership || !['OWNER', 'ADMIN'].includes(membership.role)) {
-      return NextResponse.json(
-        { error: 'Only workspace owners and admins can upload files' },
-        { status: 403 }
-      )
-    }
+  if (file.size > maxFileBytes()) {
+    return NextResponse.json(
+      { error: `File exceeds the ${Math.round(maxFileBytes() / 1024 / 1024)}MB limit.` },
+      { status: 400 },
+    )
+  }
 
-    const formData = await request.formData()
-    const file = formData.get('file') as File | null
-    const name = formData.get('name') as string | null
+  const buffer = Buffer.from(await file.arrayBuffer())
+  const uploadType = typeCheck.type === 'csv' ? 'CSV' : 'EXCEL'
+  const parsed = parseFile(buffer, uploadType)
 
-    if (!file) {
-      return NextResponse.json({ error: 'No file provided' }, { status: 400 })
-    }
-
-    const typeCheck = validateFileType(file.name)
-    if (!typeCheck.valid || !typeCheck.type) {
-      return NextResponse.json(
-        { error: `Unsupported file type. Please upload a CSV or Excel file.` },
-        { status: 400 }
-      )
-    }
-
-    const plan = membership.workspace.plan
-    const maxSize = getMaxFileSize(plan)
-    if (file.size > maxSize) {
-      const maxMB = Math.round(maxSize / (1024 * 1024))
-      return NextResponse.json(
-        { error: `File exceeds the ${maxMB}MB limit for your plan.` },
-        { status: 400 }
-      )
-    }
-
-    const objectKey = await uploadFile(file, workspaceId, file.name)
-      .then((result) => result.objectKey)
-      .catch(() => null)
-
-    const fileType = typeCheck.type
-    let columns: string[] = []
-    let rows: Record<string, unknown>[] = []
-    let rowCount = 0
-
-    if (fileType === 'csv') {
-      const text = await file.text()
-      const parsed = await parseCSV(text)
-      columns = parsed.columns
-      rows = parsed.rows
-      rowCount = parsed.rowCount
-    } else {
-      const buffer = Buffer.from(await file.arrayBuffer())
-      const parsed = await parseExcel(buffer)
-      columns = parsed.columns
-      rows = parsed.rows
-      rowCount = parsed.rowCount
-    }
-
-    const connectionName = name || file.name.replace(/\.[^/.]+$/, '')
-
-    const tableName = connectionName
+  const connectionName = name ?? file.name.replace(/\.[^/.]+$/, '')
+  const tableName =
+    connectionName
       .toLowerCase()
       .replace(/[^a-z0-9]+/g, '_')
       .replace(/^_|_$/g, '')
-      .slice(0, 50)
+      .slice(0, 50) || 'dataset'
 
-    if (columns.length > 0 && rows.length > 0) {
-      try {
-        await createTempTable(tableName, columns, rows)
-      } catch (duckdbError) {
-        console.error('DuckDB temp table creation failed:', duckdbError)
-      }
-    }
+  const { objectKey } = await uploadBuffer(
+    auth.uid,
+    file.name,
+    buffer,
+    uploadType === 'CSV'
+      ? 'text/csv'
+      : 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  )
 
-    const schema = buildSchemaFromParsedFile(tableName, columns, rows)
+  const schema = buildFileSchema(tableName, parsed.columns, parsed.rows)
 
-    const connection = await prisma.dataConnection.create({
-      data: {
-        workspaceId,
-        name: connectionName,
-        type: fileType === 'csv' ? 'CSV' : 'EXCEL',
-        status: 'ACTIVE',
-        credentials: {
-          fileName: file.name,
-          sheetName: fileType === 'excel' ? 'Sheet1' : undefined,
-          rowCount,
-          columnCount: columns.length,
-          tableName,
-        },
-        schemaCache: schema as unknown as import('@prisma/client').Prisma.InputJsonValue,
-        fileObjectKey: objectKey,
-        fileSizeBytes: file.size,
-        lastTestedAt: new Date(),
+  const connection = await createConnection(auth.uid, {
+    name: connectionName,
+    type: uploadType,
+    credentials: {
+      fileName: file.name,
+      tableName,
+      rowCount: parsed.rows.length,
+      columnCount: parsed.columns.length,
+    },
+    schema,
+    fileObjectKey: objectKey,
+    fileSizeBytes: file.size,
+  })
+
+  return NextResponse.json(
+    {
+      connection,
+      meta: {
+        rowCount: parsed.rows.length,
+        columnCount: parsed.columns.length,
+        columns: parsed.columns,
       },
-    })
-
-    return NextResponse.json(
-      {
-        connection: {
-          id: connection.id,
-          name: connection.name,
-          type: connection.type,
-          status: connection.status,
-          fileSizeBytes: connection.fileSizeBytes,
-          lastTestedAt: connection.lastTestedAt,
-          createdAt: connection.createdAt,
-        },
-        meta: {
-          rowCount,
-          columnCount: columns.length,
-          columns,
-        },
-      },
-      { status: 201 }
-    )
-  } catch (error) {
-    console.error('Error uploading file:', error)
-    return NextResponse.json(
-      { error: 'Failed to upload file' },
-      { status: 500 }
-    )
-  }
+    },
+    { status: 201 },
+  )
 }

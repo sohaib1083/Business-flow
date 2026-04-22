@@ -1,233 +1,157 @@
+import 'server-only'
+import duckdb from 'duckdb'
+import Papa from 'papaparse'
+import * as XLSX from 'xlsx'
 import type { SchemaInfo } from '@/types/connection'
 
-const MAX_ROWS = 10000
-const QUERY_TIMEOUT_MS = 10000
+const MAX_ROWS = 200_000
+const SAMPLE_ROWS_FOR_SCHEMA = 50
 
-interface ParseResult {
+export interface ParsedFile {
   columns: string[]
   rows: Record<string, unknown>[]
-  rowCount: number
 }
 
-interface QueryResult {
-  rows: Record<string, unknown>[]
-  rowCount: number
-  durationMs: number
-}
-
-let duckdbInstance: any | null = null
-let duckdbConn: unknown = null
-let duckdbAvailable = false
-
-async function getDuckDB(): Promise<{ db: unknown; conn: unknown } | null> {
-  if (duckdbInstance && duckdbConn) {
-    return { db: duckdbInstance, conn: duckdbConn }
-  }
-
-  try {
-    const duckdb = await import('duckdb')
-    duckdbInstance = new (duckdb as any).Database(':memory:')
-    duckdbConn = await new Promise<unknown>((resolve, reject) => {
-      duckdbInstance!.connect((err: Error | null, conn: unknown) => {
-        if (err) reject(err)
-        else resolve(conn)
-      })
-    })
-    duckdbAvailable = true
-    return { db: duckdbInstance, conn: duckdbConn }
-  } catch {
-    duckdbAvailable = false
-    return null
-  }
-}
-
-async function duckDBRun(
-  conn: unknown,
-  sql: string
-): Promise<Record<string, unknown>[]> {
-  const connection = conn as any
-  return new Promise((resolve, reject) => {
-    connection.all(sql, (err: Error | null, rows: Record<string, unknown>[]) => {
-      if (err) reject(err)
-      else resolve(rows ?? [])
-    })
-  })
-}
-
-function inferColumnType(values: unknown[]): string {
-  const nonNull = values.filter((v) => v !== null && v !== undefined && v !== '')
-  if (nonNull.length === 0) return 'TEXT'
-
-  const sample = nonNull.slice(0, 100)
-
-  const allNumbers = sample.every((v) => !isNaN(Number(v)) && String(v).trim() !== '')
-  if (allNumbers) {
-    const hasDecimal = sample.some((v) => String(v).includes('.'))
-    return hasDecimal ? 'DOUBLE' : 'INTEGER'
-  }
-
-  const allDates = sample.every((v) => {
-    const d = new Date(v as string)
-    return !isNaN(d.getTime()) && typeof v === 'string' && v.length > 6
-  })
-  if (allDates) return 'TIMESTAMP'
-
-  const allBooleans = sample.every(
-    (v) =>
-      v === 'true' ||
-      v === 'false' ||
-      v === 'TRUE' ||
-      v === 'FALSE' ||
-      v === '1' ||
-      v === '0'
-  )
-  if (allBooleans) return 'BOOLEAN'
-
-  return 'TEXT'
-}
-
-function sanitizeColumnName(name: string): string {
-  return name
-    .replace(/[^a-zA-Z0-9_]/g, '_')
-    .replace(/^(\d)/, '_$1')
-    .replace(/_+/g, '_')
-    .replace(/^_|_$/g, '')
-    || 'column'
-}
-
-function escapeColumnName(name: string): string {
-  return `"${name.replace(/"/g, '""')}"`
-}
-
-export async function parseCSV(content: string): Promise<ParseResult> {
-  const Papa = (await import('papaparse')).default
-  const result = Papa.parse<Record<string, unknown>>(content, {
+export function parseCsv(buffer: Buffer): ParsedFile {
+  const text = buffer.toString('utf-8')
+  const parsed = Papa.parse<Record<string, unknown>>(text, {
     header: true,
     skipEmptyLines: true,
-    dynamicTyping: false,
+    dynamicTyping: true,
   })
-
-  const rawColumns = result.meta.fields ?? []
-  const rows = (result.data as Record<string, unknown>[]).slice(0, MAX_ROWS)
-  const columns = rawColumns.map(sanitizeColumnName)
-
-  const mappedRows = rows.map((row) => {
-    const mapped: Record<string, unknown> = {}
-    for (let i = 0; i < rawColumns.length; i++) {
-      mapped[columns[i]] = row[rawColumns[i]]
-    }
-    return mapped
-  })
-
-  return { columns, rows: mappedRows, rowCount: mappedRows.length }
+  if (parsed.errors.length > 0 && parsed.data.length === 0) {
+    throw new Error(`CSV parse error: ${parsed.errors[0].message}`)
+  }
+  const rows = parsed.data.slice(0, MAX_ROWS)
+  const columns = parsed.meta.fields ?? (rows[0] ? Object.keys(rows[0]) : [])
+  return { columns, rows }
 }
 
-export async function parseExcel(
-  buffer: Buffer
-): Promise<ParseResult> {
-  const XLSX = await import('xlsx')
-  const workbook = XLSX.read(buffer, { type: 'buffer' })
-  const sheetName = workbook.SheetNames[0]
-  const sheet = workbook.Sheets[sheetName]
-
-  const jsonData = XLSX.utils.sheet_to_json<Record<string, unknown>>(sheet, {
+export function parseExcel(buffer: Buffer): ParsedFile {
+  const wb = XLSX.read(buffer, { type: 'buffer' })
+  const sheetName = wb.SheetNames[0]
+  if (!sheetName) throw new Error('Workbook has no sheets')
+  const sheet = wb.Sheets[sheetName]
+  const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(sheet, {
     defval: null,
+    raw: true,
   })
-
-  const rows = jsonData.slice(0, MAX_ROWS)
-
-  if (rows.length === 0) {
-    return { columns: [], rows: [], rowCount: 0 }
-  }
-
-  const rawColumns = Object.keys(rows[0])
-  const columns = rawColumns.map(sanitizeColumnName)
-
-  const mappedRows = rows.map((row) => {
-    const mapped: Record<string, unknown> = {}
-    for (let i = 0; i < rawColumns.length; i++) {
-      mapped[columns[i]] = row[rawColumns[i]]
-    }
-    return mapped
-  })
-
-  return { columns, rows: mappedRows, rowCount: mappedRows.length }
+  const trimmed = rows.slice(0, MAX_ROWS)
+  const columns = trimmed[0] ? Object.keys(trimmed[0]) : []
+  return { columns, rows: trimmed }
 }
 
-export async function createTempTable(
-  tableName: string,
-  columns: string[],
-  rows: Record<string, unknown>[]
-): Promise<void> {
-  const duck = await getDuckDB()
-  if (!duck) return
-
-  const safeTableName = sanitizeColumnName(tableName)
-
-  const columnTypes = columns.map((col) => {
-    const values = rows.map((r) => r[col])
-    const type = inferColumnType(values)
-    return `${escapeColumnName(col)} ${type}`
-  })
-
-  const createSQL = `CREATE TABLE IF NOT EXISTS ${escapeColumnName(safeTableName)} (${columnTypes.join(', ')})`
-  await duckDBRun(duck.conn, `DROP TABLE IF EXISTS ${escapeColumnName(safeTableName)}`)
-  await duckDBRun(duck.conn, createSQL)
-
-  if (rows.length === 0) return
-
-  for (const row of rows) {
-    const values = columns.map((col) => {
-      const val = row[col]
-      if (val === null || val === undefined || val === '') return 'NULL'
-      if (typeof val === 'number') return String(val)
-      return `'${String(val).replace(/'/g, "''")}'`
-    })
-    const insertSQL = `INSERT INTO ${escapeColumnName(safeTableName)} (${columns.map(escapeColumnName).join(', ')}) VALUES (${values.join(', ')})`
-    await duckDBRun(duck.conn, insertSQL)
-  }
+export function parseFile(buffer: Buffer, type: 'CSV' | 'EXCEL'): ParsedFile {
+  return type === 'CSV' ? parseCsv(buffer) : parseExcel(buffer)
 }
 
-export async function queryTempTable(sql: string): Promise<QueryResult> {
-  const duck = await getDuckDB()
+function sanitizeIdentifier(name: string): string {
+  const cleaned = name.replace(/[^a-zA-Z0-9_]/g, '_')
+  return /^[a-zA-Z_]/.test(cleaned) ? cleaned : `t_${cleaned}`
+}
 
-  if (duck) {
-    const start = performance.now()
-    const rows = await duckDBRun(duck.conn, sql)
-    const durationMs = Math.round(performance.now() - start)
-    return {
-      rows: rows.slice(0, MAX_ROWS),
-      rowCount: rows.length,
-      durationMs,
-    }
-  }
+function inferType(value: unknown): 'DOUBLE' | 'BIGINT' | 'BOOLEAN' | 'VARCHAR' {
+  if (typeof value === 'number') return Number.isInteger(value) ? 'BIGINT' : 'DOUBLE'
+  if (typeof value === 'boolean') return 'BOOLEAN'
+  return 'VARCHAR'
+}
 
-  throw new Error(
-    'No query engine available. DuckDB is not installed and in-memory fallback does not support arbitrary SQL.'
+function columnTypes(rows: Record<string, unknown>[], columns: string[]) {
+  const sample = rows.slice(0, SAMPLE_ROWS_FOR_SCHEMA)
+  return Object.fromEntries(
+    columns.map((c) => {
+      const firstDefined = sample.find((r) => r[c] != null)?.[c]
+      return [c, firstDefined === undefined ? 'VARCHAR' : inferType(firstDefined)]
+    }),
   )
 }
 
-export function buildSchemaFromParsedFile(
+export async function queryTabular(
+  tableName: string,
+  file: ParsedFile,
+  sql: string,
+): Promise<{ rows: Record<string, unknown>[]; rowCount: number; durationMs: number }> {
+  const safeTable = sanitizeIdentifier(tableName)
+  const colMap = Object.fromEntries(file.columns.map((c) => [c, sanitizeIdentifier(c)]))
+  const types = columnTypes(file.rows, file.columns)
+
+  const db = new duckdb.Database(':memory:')
+  const conn = db.connect()
+  const started = Date.now()
+
+  try {
+    const colDefs = file.columns.map((c) => `"${colMap[c]}" ${types[c]}`).join(', ')
+    await runAsync(conn, `DROP TABLE IF EXISTS "${safeTable}"`)
+    await runAsync(conn, `CREATE TABLE "${safeTable}" (${colDefs})`)
+
+    const batchSize = 500
+    for (let i = 0; i < file.rows.length; i += batchSize) {
+      const batch = file.rows.slice(i, i + batchSize)
+      const placeholders = batch
+        .map(() => `(${file.columns.map(() => '?').join(', ')})`)
+        .join(', ')
+      const values = batch.flatMap((r) => file.columns.map((c) => coerceValue(r[c])))
+      await runAsync(conn, `INSERT INTO "${safeTable}" VALUES ${placeholders}`, values)
+    }
+
+    const rewritten = sql.replace(
+      new RegExp(`"?${escapeRegex(tableName)}"?`, 'gi'),
+      `"${safeTable}"`,
+    )
+
+    const rows = await allAsync(conn, rewritten)
+    return { rows, rowCount: rows.length, durationMs: Date.now() - started }
+  } finally {
+    conn.close()
+    db.close()
+  }
+}
+
+export function buildFileSchema(
   tableName: string,
   columns: string[],
-  rows: Record<string, unknown>[]
+  rows: Record<string, unknown>[],
 ): SchemaInfo {
-  const columnDefs = columns.map((col) => {
-    const values = rows.map((r) => r[col])
-    return {
-      name: col,
-      type: inferColumnType(values),
-      nullable: values.some((v) => v === null || v === undefined || v === ''),
-    }
-  })
-
+  const types = columnTypes(rows, columns)
   return {
     tables: [
       {
         name: tableName,
-        columns: columnDefs,
+        columns: columns.map((c) => ({
+          name: c,
+          type: types[c],
+          nullable: rows.some((r) => r[c] == null),
+        })),
         rowCount: rows.length,
       },
     ],
   }
+}
+
+function escapeRegex(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+function coerceValue(v: unknown): unknown {
+  if (v === undefined) return null
+  if (v instanceof Date) return v.toISOString()
+  return v
+}
+
+function runAsync(conn: duckdb.Connection, sql: string, params: unknown[] = []): Promise<void> {
+  return new Promise((resolve, reject) => {
+    conn.run(sql, ...params, (err: Error | null) => {
+      if (err) reject(err)
+      else resolve()
+    })
+  })
+}
+
+function allAsync(conn: duckdb.Connection, sql: string): Promise<Record<string, unknown>[]> {
+  return new Promise((resolve, reject) => {
+    conn.all(sql, (err: Error | null, rows: Record<string, unknown>[]) => {
+      if (err) reject(err)
+      else resolve(rows)
+    })
+  })
 }

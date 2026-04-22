@@ -1,27 +1,25 @@
-import type { Metadata } from "next"
-import { Plus_Jakarta_Sans } from "next/font/google"
-import { SessionProvider } from "next-auth/react"
-import "./globals.css"
-import { Toaster } from "sonner"
+import type { Metadata } from 'next'
+import { Plus_Jakarta_Sans } from 'next/font/google'
+import { Toaster } from 'sonner'
+import { AuthProvider } from '@/lib/firebase/auth-context'
+import './globals.css'
 
-const plusJakarta = Plus_Jakarta_Sans({ subsets: ["latin"], weight: ["300", "400", "500", "600", "700"] })
+const plusJakarta = Plus_Jakarta_Sans({
+  subsets: ['latin'],
+  weight: ['300', '400', '500', '600', '700'],
+})
 
 export const metadata: Metadata = {
-  title: "Buisness Flow — AI-Powered Conversational Analytics",
-  description: "Ask your data questions in plain English. Get instant answers as text, tables, or charts. No SQL required.",
+  title: 'Buisness Flow — AI-powered conversational analytics',
+  description:
+    'Ask your data questions in plain English. Get instant answers as text, tables, or charts.',
 }
 
-export default function RootLayout({
-  children,
-}: {
-  children: React.ReactNode
-}) {
+export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="en" className="dark">
       <body className={plusJakarta.className}>
-        <SessionProvider>
-          {children}
-        </SessionProvider>
+        <AuthProvider>{children}</AuthProvider>
         <Toaster
           position="bottom-right"
           toastOptions={{

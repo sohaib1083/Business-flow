@@ -17,7 +17,6 @@ import {
   ResponsiveContainer,
 } from 'recharts'
 import { Download } from 'lucide-react'
-import { toPng } from 'html-to-image'
 import { cn } from '@/lib/utils'
 
 interface ChartRendererProps {
@@ -190,18 +189,17 @@ export function ChartRenderer({ subtype, data, chartConfig }: ChartRendererProps
 
   const handleExportPNG = async () => {
     if (!chartRef.current) return
-    try {
-      const dataUrl = await toPng(chartRef.current, {
-        backgroundColor: '#0f1119',
-        pixelRatio: 2,
-      })
-      const link = document.createElement('a')
-      link.download = `${chartConfig.title || 'chart'}.png`
-      link.href = dataUrl
-      link.click()
-    } catch (err) {
-      console.error('Failed to export chart:', err)
-    }
+    const svg = chartRef.current.querySelector('svg')
+    if (!svg) return
+    const clone = svg.cloneNode(true) as SVGSVGElement
+    const xml = new XMLSerializer().serializeToString(clone)
+    const blob = new Blob([xml], { type: 'image/svg+xml;charset=utf-8' })
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.download = `${chartConfig.title || 'chart'}.svg`
+    link.href = url
+    link.click()
+    URL.revokeObjectURL(url)
   }
 
   const preparedData = data.map((row) => {
@@ -232,7 +230,7 @@ export function ChartRenderer({ subtype, data, chartConfig }: ChartRendererProps
           )}
         >
           <Download className="w-3 h-3" />
-          Export PNG
+          Export SVG
         </button>
       </div>
 

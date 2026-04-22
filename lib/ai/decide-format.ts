@@ -1,199 +1,110 @@
-import Anthropic from '@anthropic-ai/sdk'
-import { FORMAT_DECISION_RULES } from './prompts'
+import { FORMAT_HEURISTICS as R } from './prompts'
 import type { FormattedResponse } from '@/types/query'
 
-const anthropic = new Anthropic({
-  apiKey: process.env.ANTHROPIC_API_KEY,
-})
+/**
+ * Pure heuristic that chooses between text / table / chart presentations.
+ * The user can always override by asking (e.g. "show as a bar chart").
+ */
 
-function hasDateColumn(columns: string[]): boolean {
-  return columns.some((col) =>
-    FORMAT_DECISION_RULES.DATE_COLUMN_PATTERNS.some((p) => p.test(col))
-  )
-}
-
-function isTimeSeriesQuestion(question: string): boolean {
-  return FORMAT_DECISION_RULES.TIMESERIES_PATTERNS.some((p) =>
-    p.test(question)
-  )
-}
-
-function isRankingQuestion(question: string): boolean {
-  return FORMAT_DECISION_RULES.RANKING_PATTERNS.some((p) => p.test(question))
-}
-
-function isPercentageQuestion(question: string): boolean {
-  return FORMAT_DECISION_RULES.PERCENTAGE_PATTERNS.some((p) =>
-    p.test(question)
-  )
-}
-
-function getColumnValues(
-  data: Record<string, unknown>[],
-  column: string
-): unknown[] {
-  return data.map((row) => row[column]).filter((v) => v !== null && v !== undefined)
+function valuesOf(data: Record<string, unknown>[], col: string): unknown[] {
+  return data.map((r) => r[col]).filter((v) => v !== null && v !== undefined)
 }
 
 function isDateLike(value: unknown): boolean {
   if (value instanceof Date) return true
   if (typeof value === 'string') {
-    const isoPattern = /^\d{4}-\d{2}-\d{2}/
-    const usPattern = /^\d{1,2}\/\d{1,2}\/\d{2,4}/
-    return isoPattern.test(value) || usPattern.test(value)
+    return /^\d{4}-\d{2}-\d{2}/.test(value) || /^\d{1,2}\/\d{1,2}\/\d{2,4}/.test(value)
   }
   return false
 }
 
-export function decideFormatHeuristic(
+function matches(question: string, patterns: readonly RegExp[]): boolean {
+  return patterns.some((p) => p.test(question))
+}
+
+function chartTitle(question: string): string {
+  const t = question.trim().replace(/[?!.]+$/, '')
+  return t.length > 60 ? t.slice(0, 57) + '...' : t
+}
+
+export function decideFormat(
   data: Record<string, unknown>[],
-  question: string
+  question: string,
+  options: { illustrations?: boolean } = {},
 ): Omit<FormattedResponse, 'summary'> {
-  if (!data || data.length === 0) {
-    return {
-      kind: 'text',
-      data: [],
-    }
-  }
+  const illustrations = options.illustrations ?? true
+
+  if (!data || data.length === 0) return { kind: 'text', data: [] }
 
   const columns = Object.keys(data[0])
 
+  // Single scalar → text
   if (data.length === 1 && columns.length <= 2) {
-    const values = columns.map((c) => data[0][c])
-    const numericValues = values.filter(
-      (v) => typeof v === 'number'
-    )
-
-    if (numericValues.length === 1 && columns.length <= 2) {
-      return {
-        kind: 'text',
-        data,
-      }
-    }
+    const numCount = columns.filter((c) => typeof data[0][c] === 'number').length
+    if (numCount === 1) return { kind: 'text', data }
   }
 
-  const dateColumns = columns.filter((col) => {
-    const vals = getColumnValues(data, col)
+  if (!illustrations) {
+    return columns.length >= R.TABLE_MIN_COLUMNS || data.length >= R.TABLE_MIN_ROWS
+      ? { kind: 'table', data }
+      : { kind: 'text', data }
+  }
+
+  const dateColumns = columns.filter((c) => {
+    const vals = valuesOf(data, c)
     return vals.length > 0 && vals.every(isDateLike)
   })
+  const numericColumns = columns.filter((c) =>
+    data.some((r) => typeof r[c] === 'number'),
+  )
+  const categoryColumns = columns.filter((c) => {
+    const vals = valuesOf(data, c)
+    return vals.length > 0 && vals.every((v) => typeof v === 'string')
+  })
 
+  // Time series
   if (
     dateColumns.length > 0 &&
-    data.length >= FORMAT_DECISION_RULES.TIMESERIES_MIN_POINTS
+    numericColumns.length > 0 &&
+    (data.length >= R.TIMESERIES_MIN_POINTS || matches(question, R.TIMESERIES_PATTERNS))
   ) {
-    const dateCol = dateColumns[0]
-    const numericColumns = columns.filter((col) => {
-      if (col === dateCol) return false
-      const vals = getColumnValues(data, col)
-      return vals.length > 0 && vals.some((v) => typeof v === 'number')
-    })
-
-    if (numericColumns.length > 0) {
-      return {
-        kind: 'chart',
-        chartSubtype: 'line',
-        data,
-        chartConfig: {
-          xKey: dateCol,
-          yKey: numericColumns[0],
-          title: extractChartTitle(question),
-        },
-      }
-    }
-  }
-
-  if (isTimeSeriesQuestion(question) && dateColumns.length > 0) {
-    const dateCol = dateColumns[0]
-    const numericColumns = columns.filter((col) => {
-      if (col === dateCol) return false
-      const vals = getColumnValues(data, col)
-      return vals.length > 0 && vals.some((v) => typeof v === 'number')
-    })
-
     return {
       kind: 'chart',
       chartSubtype: 'line',
       data,
       chartConfig: {
-        xKey: dateCol,
-        yKey: numericColumns[0] || columns[1] || columns[0],
-        title: extractChartTitle(question),
+        xKey: dateColumns[0],
+        yKey: numericColumns.find((c) => c !== dateColumns[0]) ?? numericColumns[0],
+        title: chartTitle(question),
       },
     }
   }
 
-  if (isRankingQuestion(question)) {
-    const categoryColumns = columns.filter((col) => {
-      const vals = getColumnValues(data, col)
-      return vals.length > 0 && vals.every((v) => typeof v === 'string')
-    })
-    const numericColumns = columns.filter((col) => {
-      const vals = getColumnValues(data, col)
-      return vals.length > 0 && vals.some((v) => typeof v === 'number')
-    })
-
-    if (categoryColumns.length > 0 && numericColumns.length > 0) {
-      return {
-        kind: 'chart',
-        chartSubtype: 'bar',
-        data,
-        chartConfig: {
-          xKey: categoryColumns[0],
-          yKey: numericColumns[0],
-          title: extractChartTitle(question),
-        },
-      }
-    }
-  }
-
-  if (isPercentageQuestion(question) || isBreakdownQuestion(question)) {
-    const categoryColumns = columns.filter((col) => {
-      const vals = getColumnValues(data, col)
-      return vals.length > 0 && vals.every((v) => typeof v === 'string')
-    })
-    const numericColumns = columns.filter((col) => {
-      const vals = getColumnValues(data, col)
-      return vals.length > 0 && vals.some((v) => typeof v === 'number')
-    })
-
-    if (
-      categoryColumns.length > 0 &&
-      numericColumns.length > 0 &&
-      data.length <= FORMAT_DECISION_RULES.PIE_MAX_BUCKETS
-    ) {
-      return {
-        kind: 'chart',
-        chartSubtype: 'pie',
-        data,
-        chartConfig: {
-          xKey: categoryColumns[0],
-          yKey: numericColumns[0],
-          title: extractChartTitle(question),
-        },
-      }
-    }
-  }
-
+  // Part-of-whole → pie
   if (
-    columns.length >= FORMAT_DECISION_RULES.TABLE_MIN_COLUMNS ||
-    data.length >= FORMAT_DECISION_RULES.TABLE_MIN_ROWS
+    matches(question, R.PERCENTAGE_PATTERNS) &&
+    categoryColumns.length > 0 &&
+    numericColumns.length > 0 &&
+    data.length <= R.PIE_MAX_BUCKETS
   ) {
     return {
-      kind: 'table',
+      kind: 'chart',
+      chartSubtype: 'pie',
       data,
+      chartConfig: {
+        xKey: categoryColumns[0],
+        yKey: numericColumns[0],
+        title: chartTitle(question),
+      },
     }
   }
 
-  const categoryColumns = columns.filter((col) => {
-    const vals = getColumnValues(data, col)
-    return vals.length > 0 && vals.every((v) => typeof v === 'string')
-  })
-  const numericColumns = columns.filter((col) => {
-    const vals = getColumnValues(data, col)
-    return vals.length > 0 && vals.some((v) => typeof v === 'number')
-  })
-
-  if (categoryColumns.length > 0 && numericColumns.length > 0 && data.length > 1) {
+  // Ranking / category comparison → bar
+  if (
+    categoryColumns.length > 0 &&
+    numericColumns.length > 0 &&
+    (matches(question, R.RANKING_PATTERNS) || data.length > 1)
+  ) {
     return {
       kind: 'chart',
       chartSubtype: 'bar',
@@ -201,104 +112,15 @@ export function decideFormatHeuristic(
       chartConfig: {
         xKey: categoryColumns[0],
         yKey: numericColumns[0],
-        title: extractChartTitle(question),
+        title: chartTitle(question),
       },
     }
   }
 
-  return {
-    kind: 'table',
-    data,
-  }
-}
-
-function isBreakdownQuestion(question: string): boolean {
-  return /breakdown|split|segment|compare|by category|by type|by status/i.test(
-    question
-  )
-}
-
-function extractChartTitle(question: string): string {
-  let title = question.trim()
-  title = title.replace(/[?!.]+$/, '')
-  if (title.length > 60) {
-    title = title.substring(0, 57) + '...'
-  }
-  return title
-}
-
-export async function decideFormatWithAI(
-  data: Record<string, unknown>[],
-  question: string
-): Promise<Omit<FormattedResponse, 'summary'>> {
-  if (!data || data.length === 0) {
-    return { kind: 'text', data: [] }
+  // Wide or detailed data → table
+  if (columns.length >= R.TABLE_MIN_COLUMNS || data.length >= R.TABLE_MIN_ROWS) {
+    return { kind: 'table', data }
   }
 
-  const columns = Object.keys(data[0])
-  const sampleRows = data.slice(0, 5)
-
-  try {
-    const response = await anthropic.messages.create({
-      model: 'claude-sonnet-4-20250514',
-      max_tokens: 512,
-      temperature: 0,
-      messages: [
-        {
-          role: 'user',
-          content: `Given this data question: "${question}"
-
-Columns: ${columns.join(', ')}
-Sample rows: ${JSON.stringify(sampleRows)}
-Total rows: ${data.length}
-
-Decide the best visualization format. Reply with ONLY a JSON object:
-{"kind": "text" | "table" | "chart", "chartSubtype": "bar" | "line" | "pie", "xKey": "column_name", "yKey": "column_name", "title": "chart title"}
-
-Rules:
-- Single scalar value -> text
-- Time-series data -> line chart
-- Ranked/compared categories -> bar chart
-- Part-of-whole with <=8 segments -> pie chart
-- Wide/detailed data -> table
-- Only include chartSubtype, xKey, yKey, title when kind is "chart"`,
-        },
-      ],
-    })
-
-    const textBlock = response.content.find(
-      (block): block is Anthropic.TextBlock => block.type === 'text'
-    )
-    if (!textBlock) throw new Error('No text in response')
-
-    let cleaned = textBlock.text.trim()
-    if (cleaned.startsWith('```json')) cleaned = cleaned.slice(7)
-    if (cleaned.startsWith('```')) cleaned = cleaned.slice(3)
-    if (cleaned.endsWith('```')) cleaned = cleaned.slice(0, -3)
-    cleaned = cleaned.trim()
-
-    const parsed = JSON.parse(cleaned)
-
-    if (!['text', 'table', 'chart'].includes(parsed.kind)) {
-      throw new Error('Invalid kind')
-    }
-
-    const result: Omit<FormattedResponse, 'summary'> = {
-      kind: parsed.kind,
-      data,
-    }
-
-    if (parsed.kind === 'chart') {
-      result.chartSubtype = parsed.chartSubtype || 'bar'
-      result.chartConfig = {
-        xKey: parsed.xKey || columns[0],
-        yKey: parsed.yKey || columns[1] || columns[0],
-        title: parsed.title || extractChartTitle(question),
-      }
-    }
-
-    return result
-  } catch {
-    return decideFormatHeuristic(data, question)
-  }
+  return { kind: 'table', data }
 }

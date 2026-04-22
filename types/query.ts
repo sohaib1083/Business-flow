@@ -15,52 +15,57 @@ export interface QueryPlan {
   groupBy?: string[]
   orderBy?: Array<{ field: string; direction: 'asc' | 'desc' }>
   limit?: number
-  timeGrain?: 'day' | 'week' | 'month' | 'quarter' | 'year'
+  joins?: Array<{
+    table: string
+    on: { left: string; right: string }
+    type?: 'inner' | 'left'
+  }>
+  timeBucket?: {
+    field: string
+    unit: 'day' | 'week' | 'month' | 'quarter' | 'year'
+    alias?: string
+  }
+}
+
+export interface ChartConfig {
+  xKey: string
+  yKey: string
+  title: string
+  color?: string
 }
 
 export interface FormattedResponse {
   kind: 'text' | 'table' | 'chart'
   chartSubtype?: 'bar' | 'line' | 'pie'
   summary: string
-  chartConfig?: {
-    xKey: string
-    yKey: string
-    title: string
-    color?: string
-  }
+  chartConfig?: ChartConfig
   data: Record<string, unknown>[]
 }
 
 export interface QueryRunResult {
-  queryRunId: string
+  runId: string
   sessionId: string
-  compiledQuery?: string
-  compiledPipeline?: Record<string, unknown>[]
+  compiledQuery: string | null
   response: FormattedResponse
   meta: {
     rowCount: number
     durationMs: number
-    cacheHit: boolean
-    privacyMode: 'standard' | 'strict'
   }
 }
 
-export interface QueryRequest {
-  workspaceId: string
-  connectionId: string
-  sessionId: string
-  question: string
-}
+export type QueryRunStatus = 'SUCCESS' | 'FAILED' | 'BLOCKED'
 
 export interface QueryHistoryEntry {
   id: string
+  sessionId: string
+  connectionId: string
+  connectionName: string
   question: string
-  compiledQuery: string | null
-  responseKind: string | null
-  chartSubtype: string | null
+  status: QueryRunStatus
+  responseKind: 'TEXT' | 'TABLE' | 'CHART' | null
   rowCount: number | null
   durationMs: number | null
-  status: string
+  compiledQuery: string | null
+  errorMessage: string | null
   createdAt: string
-  connectionName: string
 }

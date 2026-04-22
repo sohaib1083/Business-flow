@@ -1,314 +1,251 @@
+'use client'
+
 import { create } from 'zustand'
-import type {
-  QuerySession,
-  QueryMessage,
-  MessageContent,
-} from '@/types/session'
-import type { DataConnection } from '@/types/connection'
+import { firebaseAuth } from '@/lib/firebase/client'
+import type { DataConnection, QueryMessage, QuerySession, MessageContent } from '@/types/session'
 import type { QueryRunResult } from '@/types/query'
+
+async function apiFetch(input: RequestInfo | URL, init: RequestInit = {}): Promise<Response> {
+  const current = firebaseAuth.currentUser
+  const token = current ? await current.getIdToken() : null
+  const headers = new Headers(init.headers)
+  if (token) headers.set('Authorization', `Bearer ${token}`)
+  return fetch(input, { ...init, headers })
+}
 
 interface ChatState {
   sessions: QuerySession[]
   activeSessionId: string | null
   messages: QueryMessage[]
+  connections: DataConnection[]
+  activeConnectionId: string | null
   isLoading: boolean
   isStreaming: boolean
-  activeConnectionId: string | null
-  connections: DataConnection[]
+  illustrations: boolean
   error: string | null
 
-  setSessions: (sessions: QuerySession[]) => void
-  setActiveSessionId: (id: string | null) => void
-  setMessages: (messages: QueryMessage[]) => void
-  addMessage: (message: QueryMessage) => void
-  setLoading: (loading: boolean) => void
-  setStreaming: (streaming: boolean) => void
   setActiveConnectionId: (id: string | null) => void
-  setConnections: (connections: DataConnection[]) => void
-  setError: (error: string | null) => void
+  setIllustrations: (on: boolean) => void
 
   fetchSessions: () => Promise<void>
-  fetchMessages: (sessionId: string) => Promise<void>
-  sendMessage: (question: string) => Promise<void>
+  fetchConnections: () => Promise<void>
   createSession: (connectionId: string, title?: string) => Promise<QuerySession | null>
   switchSession: (sessionId: string) => Promise<void>
   deleteSession: (sessionId: string) => Promise<void>
+  sendMessage: (question: string) => Promise<void>
   retryLastQuery: () => Promise<void>
-  fetchConnections: () => Promise<void>
 }
 
 export const useChatStore = create<ChatState>((set, get) => ({
   sessions: [],
   activeSessionId: null,
   messages: [],
+  connections: [],
+  activeConnectionId: null,
   isLoading: false,
   isStreaming: false,
-  activeConnectionId: null,
-  connections: [],
+  illustrations: true,
   error: null,
 
-  setSessions: (sessions) => set({ sessions }),
-  setActiveSessionId: (id) => set({ activeSessionId: id }),
-  setMessages: (messages) => set({ messages }),
-  addMessage: (message) =>
-    set((state) => ({ messages: [...state.messages, message] })),
-  setLoading: (loading) => set({ isLoading: loading }),
-  setStreaming: (streaming) => set({ isStreaming: streaming }),
   setActiveConnectionId: (id) => set({ activeConnectionId: id }),
-  setConnections: (connections) => set({ connections }),
-  setError: (error) => set({ error }),
+  setIllustrations: (on) => set({ illustrations: on }),
 
-  fetchSessions: async () => {
+  async fetchSessions() {
     try {
-      const res = await fetch('/api/sessions')
-      if (!res.ok) throw new Error('Failed to fetch sessions')
-      const data = await res.json()
-      set({ sessions: data.sessions || [] })
-    } catch (error) {
-      console.error('Failed to fetch sessions:', error)
-      set({ error: 'Failed to load sessions' })
+      const res = await apiFetch('/api/sessions')
+      if (!res.ok) throw new Error('Failed to load sessions')
+      const data = (await res.json()) as { sessions: QuerySession[] }
+      set({ sessions: data.sessions })
+    } catch (e) {
+      set({ error: e instanceof Error ? e.message : 'Failed to load sessions' })
     }
   },
 
-  fetchMessages: async (sessionId) => {
+  async fetchConnections() {
     try {
-      const res = await fetch(`/api/sessions/${sessionId}`)
-      if (!res.ok) throw new Error('Failed to fetch messages')
-      const data = await res.json()
-      set({
-        messages: data.messages || [],
-        activeSessionId: sessionId,
+      const res = await apiFetch('/api/connections')
+      if (!res.ok) throw new Error('Failed to load connections')
+      const data = (await res.json()) as { connections: DataConnection[] }
+      set({ connections: data.connections })
+    } catch (e) {
+      set({ error: e instanceof Error ? e.message : 'Failed to load connections' })
+    }
+  },
+
+  async createSession(connectionId, title) {
+    try {
+      const res = await apiFetch('/api/sessions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ connectionId, title }),
       })
-    } catch (error) {
-      console.error('Failed to fetch messages:', error)
-      set({ error: 'Failed to load messages' })
+      if (!res.ok) throw new Error('Failed to create session')
+      const { session } = (await res.json()) as { session: QuerySession }
+      set((s) => ({
+        sessions: [session, ...s.sessions],
+        activeSessionId: session.id,
+        activeConnectionId: connectionId,
+        messages: [],
+      }))
+      return session
+    } catch (e) {
+      set({ error: e instanceof Error ? e.message : 'Failed to create session' })
+      return null
     }
   },
 
-  sendMessage: async (question) => {
-    const state = get()
-    const sessionId = state.activeSessionId
-    const connectionId = state.activeConnectionId
+  async switchSession(sessionId) {
+    set({ activeSessionId: sessionId, messages: [], isLoading: true })
+    try {
+      const res = await apiFetch(`/api/sessions/${sessionId}`)
+      if (!res.ok) throw new Error('Failed to load session')
+      const data = (await res.json()) as {
+        session: QuerySession
+        messages: QueryMessage[]
+      }
+      set({
+        messages: data.messages,
+        activeConnectionId: data.session.connectionId,
+        isLoading: false,
+      })
+    } catch (e) {
+      set({ isLoading: false, error: e instanceof Error ? e.message : 'Failed to load session' })
+    }
+  },
 
-    if (!sessionId || !connectionId) {
+  async deleteSession(sessionId) {
+    try {
+      const res = await apiFetch(`/api/sessions/${sessionId}`, { method: 'DELETE' })
+      if (!res.ok) throw new Error('Failed to delete session')
+      set((s) => {
+        const remaining = s.sessions.filter((x) => x.id !== sessionId)
+        const isActive = s.activeSessionId === sessionId
+        return {
+          sessions: remaining,
+          activeSessionId: isActive ? (remaining[0]?.id ?? null) : s.activeSessionId,
+          messages: isActive ? [] : s.messages,
+          activeConnectionId: isActive ? null : s.activeConnectionId,
+        }
+      })
+    } catch (e) {
+      set({ error: e instanceof Error ? e.message : 'Failed to delete session' })
+    }
+  },
+
+  async sendMessage(question) {
+    const { activeSessionId, activeConnectionId, illustrations } = get()
+    if (!activeSessionId || !activeConnectionId) {
       set({ error: 'No active session or connection' })
       return
     }
 
-    const userMessage: QueryMessage = {
-      id: `temp_${Date.now()}_user`,
-      sessionId,
+    const typingId = `tmp_${Date.now()}_typing`
+    const userTmp: QueryMessage = {
+      id: `tmp_${Date.now()}_user`,
+      sessionId: activeSessionId,
       role: 'USER',
       content: { type: 'text', text: question },
       createdAt: new Date().toISOString(),
     }
-
-    const typingMessage: QueryMessage = {
-      id: `temp_${Date.now()}_typing`,
-      sessionId,
+    const typing: QueryMessage = {
+      id: typingId,
+      sessionId: activeSessionId,
       role: 'ASSISTANT',
       content: { type: 'text', text: '__TYPING__' },
       createdAt: new Date().toISOString(),
     }
 
     set((s) => ({
-      messages: [...s.messages, userMessage, typingMessage],
+      messages: [...s.messages, userTmp, typing],
       isLoading: true,
       isStreaming: true,
       error: null,
     }))
 
     try {
-      const res = await fetch('/api/query', {
+      const res = await apiFetch('/api/query', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          sessionId,
-          connectionId,
+          sessionId: activeSessionId,
+          connectionId: activeConnectionId,
           question,
-          workspaceId: '',
+          illustrations,
         }),
       })
 
       if (!res.ok) {
-        const errorData = await res.json().catch(() => ({}))
-        throw new Error(errorData.error || 'Query failed')
+        const err = await res.json().catch(() => ({}))
+        throw new Error(err?.error ?? 'Query failed')
       }
 
-      const result: QueryRunResult = await res.json()
+      const result = (await res.json()) as QueryRunResult
+      const assistantContent: MessageContent = {
+        type: 'response',
+        summary: result.response.summary,
+        responseKind: result.response.kind,
+        chartSubtype: result.response.chartSubtype,
+        data: result.response.data,
+        chartConfig: result.response.chartConfig,
+        compiledQuery: result.compiledQuery ?? undefined,
+      }
 
       set((s) => {
-        const filtered = s.messages.filter(
-          (m) => m.id !== typingMessage.id && m.id !== userMessage.id
-        )
-
-        const confirmedUserMsg: QueryMessage = {
-          id: result.queryRunId
-            ? `msg_${result.queryRunId}_user`
-            : `msg_${Date.now()}_user`,
-          sessionId,
+        const filtered = s.messages.filter((m) => m.id !== typingId && m.id !== userTmp.id)
+        const userMsg: QueryMessage = {
+          id: `msg_${result.runId}_u`,
+          sessionId: activeSessionId,
           role: 'USER',
-          content: { type: 'query', question, queryRunId: result.queryRunId },
+          content: { type: 'query', question, runId: result.runId },
           createdAt: new Date().toISOString(),
         }
-
-        const assistantMessage: QueryMessage = {
-          id: result.queryRunId
-            ? `msg_${result.queryRunId}_asst`
-            : `msg_${Date.now()}_asst`,
-          sessionId,
+        const asstMsg: QueryMessage = {
+          id: `msg_${result.runId}_a`,
+          sessionId: activeSessionId,
           role: 'ASSISTANT',
-          content: {
-            type: 'response',
-            summary: result.response.summary,
-            responseKind: result.response.kind,
-            chartSubtype: result.response.chartSubtype,
-            data: result.response.data,
-            chartConfig: result.response.chartConfig,
-            compiledQuery: result.compiledQuery,
-          } as MessageContent,
+          content: assistantContent,
           createdAt: new Date().toISOString(),
         }
-
         return {
-          messages: [...filtered, confirmedUserMsg, assistantMessage],
+          messages: [...filtered, userMsg, asstMsg],
           isLoading: false,
           isStreaming: false,
         }
       })
-    } catch (error) {
-      const errorMessage: QueryMessage = {
-        id: `temp_${Date.now()}_error`,
-        sessionId,
-        role: 'ASSISTANT',
-        content: {
-          type: 'error',
-          message:
-            error instanceof Error ? error.message : 'An unexpected error occurred',
-        },
-        createdAt: new Date().toISOString(),
-      }
-
+    } catch (e) {
       set((s) => {
-        const filtered = s.messages.filter(
-          (m) => m.id !== typingMessage.id
-        )
+        const filtered = s.messages.filter((m) => m.id !== typingId)
+        const errMsg: QueryMessage = {
+          id: `err_${Date.now()}`,
+          sessionId: activeSessionId,
+          role: 'ASSISTANT',
+          content: { type: 'error', message: e instanceof Error ? e.message : 'Query failed' },
+          createdAt: new Date().toISOString(),
+        }
         return {
-          messages: [...filtered, errorMessage],
+          messages: [...filtered, errMsg],
           isLoading: false,
           isStreaming: false,
-          error: error instanceof Error ? error.message : 'Query failed',
+          error: e instanceof Error ? e.message : 'Query failed',
         }
       })
     }
   },
 
-  createSession: async (connectionId, title) => {
-    try {
-      const res = await fetch('/api/sessions', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ connectionId, title }),
-      })
-
-      if (!res.ok) throw new Error('Failed to create session')
-      const data = await res.json()
-
-      const session: QuerySession = data.session
-
-      set((s) => ({
-        sessions: [session, ...s.sessions],
-        activeSessionId: session.id,
-        messages: [],
-        activeConnectionId: connectionId,
-      }))
-
-      return session
-    } catch (error) {
-      console.error('Failed to create session:', error)
-      set({ error: 'Failed to create session' })
-      return null
-    }
-  },
-
-  switchSession: async (sessionId) => {
-    set({ activeSessionId: sessionId, messages: [], isLoading: true })
-
-    try {
-      const res = await fetch(`/api/sessions/${sessionId}`)
-      if (!res.ok) throw new Error('Failed to load session')
-      const data = await res.json()
-
-      set({
-        messages: data.messages || [],
-        activeConnectionId: data.session?.connectionId || null,
-        isLoading: false,
-      })
-    } catch (error) {
-      console.error('Failed to switch session:', error)
-      set({ isLoading: false, error: 'Failed to load session' })
-    }
-  },
-
-  deleteSession: async (sessionId) => {
-    try {
-      const res = await fetch(`/api/sessions/${sessionId}`, {
-        method: 'DELETE',
-      })
-      if (!res.ok) throw new Error('Failed to delete session')
-
-      set((s) => {
-        const remaining = s.sessions.filter((sess) => sess.id !== sessionId)
-        const isActive = s.activeSessionId === sessionId
-        return {
-          sessions: remaining,
-          activeSessionId: isActive
-            ? remaining[0]?.id || null
-            : s.activeSessionId,
-          messages: isActive ? [] : s.messages,
-          activeConnectionId: isActive ? null : s.activeConnectionId,
-        }
-      })
-    } catch (error) {
-      console.error('Failed to delete session:', error)
-      set({ error: 'Failed to delete session' })
-    }
-  },
-
-  retryLastQuery: async () => {
+  async retryLastQuery() {
     const { messages } = get()
-    const userMessages = messages.filter((m) => m.role === 'USER')
-    const lastUserMessage = userMessages[userMessages.length - 1]
-
-    if (!lastUserMessage) return
-
-    let question: string | null = null
-    if (
-      lastUserMessage.content.type === 'text'
-    ) {
-      question = lastUserMessage.content.text
-    } else if (lastUserMessage.content.type === 'query') {
-      question = lastUserMessage.content.question
-    }
-
+    const lastUser = [...messages].reverse().find((m) => m.role === 'USER')
+    if (!lastUser) return
+    const question =
+      lastUser.content.type === 'text'
+        ? lastUser.content.text
+        : lastUser.content.type === 'query'
+          ? lastUser.content.question
+          : null
     if (!question) return
-
-    set((s) => ({
-      messages: s.messages.slice(0, -1),
-    }))
-
+    set((s) => ({ messages: s.messages.slice(0, -1) }))
     await get().sendMessage(question)
   },
-
-  fetchConnections: async () => {
-    try {
-      const res = await fetch('/api/connections')
-      if (!res.ok) throw new Error('Failed to fetch connections')
-      const data = await res.json()
-      set({ connections: data.connections || [] })
-    } catch (error) {
-      console.error('Failed to fetch connections:', error)
-      set({ error: 'Failed to load connections' })
-    }
-  },
 }))
+
+export { apiFetch }

@@ -1,6 +1,19 @@
 import pg from 'pg'
 import type { PostgresCredentials, SchemaInfo } from '@/types/connection'
 
+// Postgres returns NUMERIC/DECIMAL and BIGINT as strings by default because
+// JS numbers lose precision above 2^53. For an analytics product that is fine:
+// we parse them to numbers so charts, summaries, and JSON all treat them
+// consistently. If a client needs exact precision for invoices they can opt
+// out by setting BF_EXACT_NUMERIC=1.
+if (!process.env.BF_EXACT_NUMERIC) {
+  // 1700 = NUMERIC, 20 = INT8/BIGINT, 701 = FLOAT8, 700 = FLOAT4
+  pg.types.setTypeParser(1700, (v: string) => Number(v))
+  pg.types.setTypeParser(20, (v: string) => Number(v))
+  pg.types.setTypeParser(701, (v: string) => Number(v))
+  pg.types.setTypeParser(700, (v: string) => Number(v))
+}
+
 const DEFAULT_STATEMENT_TIMEOUT = 10000
 const MAX_ROWS = 10000
 

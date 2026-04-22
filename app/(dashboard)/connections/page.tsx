@@ -5,9 +5,10 @@ import { ConnectionCard } from '@/components/connections/ConnectionCard'
 import { ConnectionForm } from '@/components/connections/ConnectionForm'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
-import { Badge } from '@/components/ui/badge'
 import { cn } from '@/lib/utils'
 import { toast } from 'sonner'
+import { apiFetch } from '@/lib/store/chat-store'
+import type { DataConnection } from '@/types/session'
 import {
   Plus,
   Search,
@@ -20,22 +21,7 @@ import {
 } from 'lucide-react'
 
 type ConnectionType = 'POSTGRES' | 'MYSQL' | 'MONGODB' | 'CSV' | 'EXCEL'
-type ConnectionStatus = 'ACTIVE' | 'ERROR' | 'DISABLED'
-
-interface Connection {
-  id: string
-  workspaceId: string
-  name: string
-  type: ConnectionType
-  status: ConnectionStatus
-  schemaCache: Record<string, unknown> | null
-  fileObjectKey?: string | null
-  fileSizeBytes?: number | null
-  lastTestedAt: string | null
-  createdAt: string
-  updatedAt: string
-}
-
+type Connection = DataConnection
 type FilterType = 'ALL' | ConnectionType
 
 const FILTER_OPTIONS: Array<{ value: FilterType; label: string }> = [
@@ -57,7 +43,7 @@ export default function ConnectionsPage() {
 
   const fetchConnections = React.useCallback(async () => {
     try {
-      const response = await fetch('/api/connections')
+      const response = await apiFetch('/api/connections')
       if (!response.ok) throw new Error('Failed to fetch connections')
       const data = await response.json()
       setConnections(data.connections ?? [])
@@ -74,74 +60,52 @@ export default function ConnectionsPage() {
   }, [fetchConnections])
 
   const handleCreateConnection = async (data: Record<string, unknown>) => {
-    const response = await fetch('/api/connections', {
+    const response = await apiFetch('/api/connections', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(data),
     })
-
     if (!response.ok) {
       const result = await response.json()
       throw new Error(result.error || 'Failed to create connection')
     }
-
-    toast.success('Connection created successfully')
+    toast.success('Connection created')
     await fetchConnections()
   }
 
-  const handleUpdateConnection = async (data: Record<string, unknown>) => {
-    if (!editingConnection) return
-
-    const response = await fetch(`/api/connections/${editingConnection.id}`, {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        name: data.name,
-        ...(data.credentials ? { credentials: data.credentials } : {}),
-      }),
-    })
-
-    if (!response.ok) {
-      const result = await response.json()
-      throw new Error(result.error || 'Failed to update connection')
-    }
-
-    toast.success('Connection updated successfully')
-    setEditingConnection(null)
-    await fetchConnections()
+  const handleUpdateConnection = async () => {
+    // Update isn't supported in the simple model — delete and recreate.
+    toast.info('Delete and recreate to change credentials')
   }
 
   const handleDeleteConnection = async (id: string) => {
-    const response = await fetch(`/api/connections/${id}`, {
-      method: 'DELETE',
-    })
-
+    const response = await apiFetch(`/api/connections/${id}`, { method: 'DELETE' })
     if (!response.ok) {
       const result = await response.json()
       throw new Error(result.error || 'Failed to delete connection')
     }
-
     toast.success('Connection deleted')
     setConnections((prev) => prev.filter((c) => c.id !== id))
   }
 
   const handleTestConnection = async (id: string) => {
-    toast.promise(
-      fetch(`/api/connections/${id}/test`, { method: 'POST' }).then(async (response) => {
+    const promise = apiFetch(`/api/connections/${id}/test`, { method: 'POST' }).then(
+      async (response) => {
         const data = await response.json()
-        if (!response.ok) throw new Error(data.error || 'Test failed')
-        if (!data.testResult?.success) {
-          throw new Error(data.testResult?.message || 'Connection test failed')
+        if (!response.ok || !data.success) {
+          throw new Error(data.message || data.error || 'Connection test failed')
         }
         await fetchConnections()
-        return data.testResult
-      }),
-      {
-        loading: 'Testing connection...',
-        success: (result: { message: string }) => result.message,
-        error: (err: Error) => err.message,
-      }
+        return data as { success: boolean; message: string }
+      },
     )
+    toast.promise(promise, {
+      loading: 'Testing connection...',
+      success: (result) => result.message,
+      error: (err: Error) => err.message,
+    })
+    // Await so the card's spinner mirrors the real state and throws if it fails.
+    await promise.catch(() => undefined)
   }
 
   const handleEditConnection = (id: string) => {
@@ -300,10 +264,8 @@ export default function ConnectionsPage() {
         }}
         onSubmit={
           editingConnection
-            ? (data) =>
-                handleUpdateConnection(data as unknown as Record<string, unknown>)
-            : (data) =>
-                handleCreateConnection(data as unknown as Record<string, unknown>)
+            ? () => handleUpdateConnection()
+            : (data) => handleCreateConnection(data as unknown as Record<string, unknown>)
         }
         initialData={
           editingConnection

@@ -24,6 +24,7 @@ import {
 import { cn } from '@/lib/utils'
 import { formatNumber, formatDuration } from '@/lib/utils'
 import type { QueryHistoryEntry } from '@/types/query'
+import { apiFetch } from '@/lib/store/chat-store'
 
 type StatusFilter = 'ALL' | 'SUCCESS' | 'FAILED' | 'BLOCKED'
 
@@ -57,47 +58,39 @@ const RESPONSE_KIND_CONFIG = {
 export default function HistoryPage() {
   const [entries, setEntries] = React.useState<QueryHistoryEntry[]>([])
   const [isLoading, setIsLoading] = React.useState(true)
-  const [page, setPage] = React.useState(1)
-  const [totalPages, setTotalPages] = React.useState(1)
-  const [total, setTotal] = React.useState(0)
   const [searchQuery, setSearchQuery] = React.useState('')
   const [statusFilter, setStatusFilter] = React.useState<StatusFilter>('ALL')
   const [sortColumn, setSortColumn] = React.useState<string>('createdAt')
   const [sortDirection, setSortDirection] = React.useState<'asc' | 'desc'>('desc')
   const [showFilters, setShowFilters] = React.useState(false)
-  const pageSize = 20
+
+  const filteredEntries = React.useMemo(() => {
+    const q = searchQuery.trim().toLowerCase()
+    return entries.filter((e) => {
+      if (statusFilter !== 'ALL' && e.status !== statusFilter) return false
+      if (q && !e.question.toLowerCase().includes(q)) return false
+      return true
+    })
+  }, [entries, searchQuery, statusFilter])
+  const total = filteredEntries.length
 
   const fetchHistory = React.useCallback(async () => {
     setIsLoading(true)
     try {
-      const params = new URLSearchParams({
-        page: String(page),
-        pageSize: String(pageSize),
-      })
-      if (searchQuery.trim()) params.set('search', searchQuery.trim())
-      if (statusFilter !== 'ALL') params.set('status', statusFilter)
-
-      const response = await fetch(`/api/history?${params}`)
+      const response = await apiFetch(`/api/history?limit=200`)
       if (!response.ok) throw new Error('Failed to fetch history')
       const data = await response.json()
-
       setEntries(data.entries || [])
-      setTotal(data.total || 0)
-      setTotalPages(data.totalPages || 1)
     } catch (error) {
       console.error('Failed to fetch history:', error)
     } finally {
       setIsLoading(false)
     }
-  }, [page, searchQuery, statusFilter])
+  }, [])
 
   React.useEffect(() => {
     fetchHistory()
   }, [fetchHistory])
-
-  React.useEffect(() => {
-    setPage(1)
-  }, [searchQuery, statusFilter])
 
   const handleRetry = (entry: QueryHistoryEntry) => {
     const chatUrl = `/chat`
@@ -380,7 +373,7 @@ export default function HistoryPage() {
                 </tr>
               </thead>
               <tbody>
-                {entries.map((entry, idx) => {
+                {filteredEntries.map((entry, idx) => {
                   const statusConfig =
                     STATUS_CONFIG[entry.status as keyof typeof STATUS_CONFIG]
                   const StatusIcon = statusConfig?.icon || XCircle
@@ -480,68 +473,6 @@ export default function HistoryPage() {
         )}
       </div>
 
-      {totalPages > 1 && (
-        <div className="flex items-center justify-between">
-          <p className="text-xs text-muted-foreground">
-            Showing {(page - 1) * pageSize + 1}-
-            {Math.min(page * pageSize, total)} of {total} results
-          </p>
-          <div className="flex items-center gap-1">
-            <button
-              onClick={() => setPage(Math.max(1, page - 1))}
-              disabled={page === 1}
-              className={cn(
-                'p-2 rounded-md',
-                'text-muted-foreground hover:text-foreground',
-                'hover:bg-secondary transition-all',
-                'disabled:opacity-30 disabled:cursor-not-allowed'
-              )}
-            >
-              <ChevronLeft className="w-4 h-4" />
-            </button>
-            {Array.from({ length: Math.min(5, totalPages) }, (_, i) => {
-              let pageNum: number
-              if (totalPages <= 5) {
-                pageNum = i + 1
-              } else if (page <= 3) {
-                pageNum = i + 1
-              } else if (page >= totalPages - 2) {
-                pageNum = totalPages - 4 + i
-              } else {
-                pageNum = page - 2 + i
-              }
-
-              return (
-                <button
-                  key={pageNum}
-                  onClick={() => setPage(pageNum)}
-                  className={cn(
-                    'w-8 h-8 rounded-md text-xs font-medium',
-                    'transition-all',
-                    pageNum === page
-                      ? 'bg-primary text-background'
-                      : 'text-muted-foreground hover:text-foreground hover:bg-secondary'
-                  )}
-                >
-                  {pageNum}
-                </button>
-              )
-            })}
-            <button
-              onClick={() => setPage(Math.min(totalPages, page + 1))}
-              disabled={page >= totalPages}
-              className={cn(
-                'p-2 rounded-md',
-                'text-muted-foreground hover:text-foreground',
-                'hover:bg-secondary transition-all',
-                'disabled:opacity-30 disabled:cursor-not-allowed'
-              )}
-            >
-              <ChevronRight className="w-4 h-4" />
-            </button>
-          </div>
-        </div>
-      )}
     </div>
   )
 }
