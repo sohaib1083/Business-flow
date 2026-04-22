@@ -1,11 +1,30 @@
 import 'server-only'
-import duckdb from 'duckdb'
 import Papa from 'papaparse'
 import * as XLSX from 'xlsx'
 import type { SchemaInfo } from '@/types/connection'
 
 const MAX_ROWS = 200_000
 const SAMPLE_ROWS_FOR_SCHEMA = 50
+
+interface DuckConnection {
+  run(sql: string, ...args: unknown[]): void
+  all(sql: string, cb: (err: Error | null, rows: Record<string, unknown>[]) => void): void
+  close(): void
+}
+
+interface DuckDatabase {
+  connect(): DuckConnection
+  close(): void
+}
+
+function loadDuckDB(): { Database: new (path: string) => DuckDatabase } {
+  try {
+    // Lazy runtime require avoids loading native duckdb during platform build-time analysis.
+    return require('duckdb') as { Database: new (path: string) => DuckDatabase }
+  } catch {
+    throw new Error('File querying engine is unavailable in this runtime environment.')
+  }
+}
 
 export interface ParsedFile {
   columns: string[]
@@ -71,11 +90,12 @@ export async function queryTabular(
   file: ParsedFile,
   sql: string,
 ): Promise<{ rows: Record<string, unknown>[]; rowCount: number; durationMs: number }> {
+  const { Database } = loadDuckDB()
   const safeTable = sanitizeIdentifier(tableName)
   const colMap = Object.fromEntries(file.columns.map((c) => [c, sanitizeIdentifier(c)]))
   const types = columnTypes(file.rows, file.columns)
 
-  const db = new duckdb.Database(':memory:')
+  const db = new Database(':memory:')
   const conn = db.connect()
   const started = Date.now()
 
@@ -138,7 +158,7 @@ function coerceValue(v: unknown): unknown {
   return v
 }
 
-function runAsync(conn: duckdb.Connection, sql: string, params: unknown[] = []): Promise<void> {
+function runAsync(conn: DuckConnection, sql: string, params: unknown[] = []): Promise<void> {
   return new Promise((resolve, reject) => {
     conn.run(sql, ...params, (err: Error | null) => {
       if (err) reject(err)
@@ -147,7 +167,7 @@ function runAsync(conn: duckdb.Connection, sql: string, params: unknown[] = []):
   })
 }
 
-function allAsync(conn: duckdb.Connection, sql: string): Promise<Record<string, unknown>[]> {
+function allAsync(conn: DuckConnection, sql: string): Promise<Record<string, unknown>[]> {
   return new Promise((resolve, reject) => {
     conn.all(sql, (err: Error | null, rows: Record<string, unknown>[]) => {
       if (err) reject(err)
