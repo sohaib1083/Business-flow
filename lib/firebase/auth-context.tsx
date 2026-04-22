@@ -44,8 +44,27 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         await signInWithEmailAndPassword(firebaseAuth, email, password)
       },
       async signUpWithEmail(name, email, password) {
-        const cred = await createUserWithEmailAndPassword(firebaseAuth, email, password)
-        if (name) await updateProfile(cred.user, { displayName: name })
+        try {
+          const cred = await createUserWithEmailAndPassword(firebaseAuth, email, password)
+          if (name) await updateProfile(cred.user, { displayName: name })
+          return
+        } catch {
+          // Fallback to server-side creation when the web SDK path fails in hosted environments.
+          const res = await fetch('/api/auth/signup', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name, email, password }),
+          })
+
+          if (!res.ok && res.status !== 409) {
+            throw new Error('signup-fallback-failed')
+          }
+
+          await signInWithEmailAndPassword(firebaseAuth, email, password)
+          if (name && firebaseAuth.currentUser) {
+            await updateProfile(firebaseAuth.currentUser, { displayName: name })
+          }
+        }
       },
       async signInWithGoogle() {
         await signInWithPopup(firebaseAuth, new GoogleAuthProvider())

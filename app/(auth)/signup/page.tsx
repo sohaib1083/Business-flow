@@ -165,8 +165,12 @@ export default function SignupPage() {
 }
 
 function toAuthError(e: unknown): string {
+  const message = (e as { message?: string } | null)?.message ?? ''
   const code = (e as { code?: string } | null)?.code ?? ''
   if (code.includes('email-already-in-use')) return 'This email is already registered. Try signing in.'
   if (code.includes('weak-password')) return 'Password is too weak. Use at least 8 characters.'
-  return 'Sign-up failed. Please try again.'
+  if (code.includes('operation-not-allowed')) return 'Email/password sign-up is disabled in Firebase Authentication settings.'
+  if (code.includes('invalid-api-key')) return 'Firebase API key is invalid. Check NEXT_PUBLIC_FIREBASE_API_KEY.'
+  if (message.includes('signup-fallback-failed')) return 'Sign-up service is unavailable right now. Please try again in a minute.'
+  return code ? `Sign-up failed (${code}). Please try again.` : 'Sign-up failed. Please try again.'
 }
