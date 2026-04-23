@@ -33,9 +33,26 @@ function createPool(creds: PostgresCredentials): pg.Pool {
     connectionString: buildConnectionString(creds),
     max: 5,
     idleTimeoutMillis: 30000,
-    connectionTimeoutMillis: 5000,
+    connectionTimeoutMillis: 10000,
     statement_timeout: DEFAULT_STATEMENT_TIMEOUT,
   })
+}
+
+function formatConnectionError(message: string): string {
+  const lower = message.toLowerCase()
+  if (lower.includes('timed out') || lower.includes('etimedout')) {
+    return 'Connection timed out. The database host may be private/inaccessible from Vercel. Use a publicly reachable host or allowlist Vercel egress IPs.'
+  }
+  if (lower.includes('password authentication failed')) {
+    return 'Authentication failed. Check username/password and database access grants.'
+  }
+  if (lower.includes('no pg_hba.conf entry')) {
+    return 'Connection rejected by pg_hba.conf. Allow this client host and user/database combination.'
+  }
+  if (lower.includes('ssl') || lower.includes('certificate')) {
+    return 'SSL/TLS handshake failed. Try enabling SSL in the connection form or adjust server SSL settings.'
+  }
+  return `Connection failed: ${message}`
 }
 
 export async function testConnection(
@@ -54,7 +71,7 @@ export async function testConnection(
   } catch (error) {
     const message =
       error instanceof Error ? error.message : 'Unknown connection error'
-    return { success: false, message: `Connection failed: ${message}` }
+    return { success: false, message: formatConnectionError(message) }
   } finally {
     if (pool) await pool.end()
   }

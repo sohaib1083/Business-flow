@@ -195,15 +195,32 @@ export function ConnectionForm({
         })
         return
       }
-      // Validate the form client-side; the real credential test happens when
-      // the connection is saved (the POST /api/connections endpoint tests
-      // credentials before persisting).
+
       const valid = await form.trigger()
+      if (!valid) {
+        setTestResult({
+          success: false,
+          message: 'Please fix the form errors first.',
+        })
+        return
+      }
+
+      const payload = {
+        type: formData.type,
+        credentials: buildCredentialsPayload(formData),
+      }
+      const response = await apiFetch('/api/connections/test', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      })
+      const result = (await response.json().catch(() => null)) as
+        | { success?: boolean; message?: string; error?: string }
+        | null
+
       setTestResult({
-        success: valid,
-        message: valid
-          ? 'Looks valid — click Save to verify the credentials.'
-          : 'Please fix the form errors first.',
+        success: Boolean(response.ok && result?.success),
+        message: result?.message || result?.error || 'Connection test failed.',
       })
     } finally {
       setIsTesting(false)

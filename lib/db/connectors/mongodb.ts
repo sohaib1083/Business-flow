@@ -15,13 +15,27 @@ interface PipelineResult {
 async function createConnection(creds: MongoCredentials): Promise<mongoose.Connection> {
   const connection = mongoose.createConnection(creds.uri, {
     dbName: creds.database,
-    serverSelectionTimeoutMS: 5000,
-    connectTimeoutMS: 5000,
+    serverSelectionTimeoutMS: 10000,
+    connectTimeoutMS: 10000,
     socketTimeoutMS: 15000,
     maxPoolSize: 5,
   })
   await connection.asPromise()
   return connection
+}
+
+function formatConnectionError(message: string): string {
+  const lower = message.toLowerCase()
+  if (lower.includes('timed out') || lower.includes('etimedout') || lower.includes('server selection')) {
+    return 'Connection timed out. The MongoDB host may be private/inaccessible from Vercel. Use a publicly reachable host or allowlist Vercel egress IPs.'
+  }
+  if (lower.includes('authentication failed') || lower.includes('auth failed')) {
+    return 'Authentication failed. Check username/password/authSource in your MongoDB URI.'
+  }
+  if (lower.includes('ssl') || lower.includes('tls')) {
+    return 'TLS/SSL handshake failed. Check your MongoDB TLS settings in the URI.'
+  }
+  return `Connection failed: ${message}`
 }
 
 export async function testConnection(
@@ -39,7 +53,7 @@ export async function testConnection(
   } catch (error) {
     const message =
       error instanceof Error ? error.message : 'Unknown connection error'
-    return { success: false, message: `Connection failed: ${message}` }
+    return { success: false, message: formatConnectionError(message) }
   } finally {
     if (connection) await connection.close()
   }

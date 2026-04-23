@@ -19,8 +19,22 @@ function buildConnectionConfig(creds: MySQLCredentials): mysql.ConnectionOptions
     password: creds.password,
     ssl: creds.ssl ? { rejectUnauthorized: false } : undefined,
     connectionLimit: 5,
-    connectTimeout: 5000,
+    connectTimeout: 10000,
   }
+}
+
+function formatConnectionError(message: string): string {
+  const lower = message.toLowerCase()
+  if (lower.includes('timed out') || lower.includes('etimedout')) {
+    return 'Connection timed out. The database host may be private/inaccessible from Vercel. Use a publicly reachable host or allowlist Vercel egress IPs.'
+  }
+  if (lower.includes('access denied')) {
+    return 'Authentication failed. Check username/password and grants for this host.'
+  }
+  if (lower.includes('ssl') || lower.includes('certificate')) {
+    return 'SSL/TLS handshake failed. Try enabling SSL in the connection form or adjust server SSL settings.'
+  }
+  return `Connection failed: ${message}`
 }
 
 export async function testConnection(
@@ -34,7 +48,7 @@ export async function testConnection(
   } catch (error) {
     const message =
       error instanceof Error ? error.message : 'Unknown connection error'
-    return { success: false, message: `Connection failed: ${message}` }
+    return { success: false, message: formatConnectionError(message) }
   } finally {
     if (connection) await connection.end()
   }

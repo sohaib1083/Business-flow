@@ -152,5 +152,10 @@ function toAuthError(e: unknown): string {
     return 'Invalid email or password.'
   }
   if (code.includes('too-many-requests')) return 'Too many attempts. Try again in a minute.'
+  if (code.includes('popup-blocked')) return 'Popup was blocked by the browser. Allow popups or try again.'
+  if (code.includes('popup-closed-by-user')) return 'Google sign-in popup was closed before completion.'
+  if (code.includes('unauthorized-domain')) return 'This domain is not authorized in Firebase Auth. Add it in Firebase Console -> Authentication -> Settings -> Authorized domains.'
+  if (code.includes('operation-not-allowed')) return 'Google sign-in is not enabled in Firebase Authentication providers.'
+  if (code.includes('account-exists-with-different-credential')) return 'An account already exists with this email using a different sign-in method.'
   return 'Sign-in failed. Please try again.'
 }

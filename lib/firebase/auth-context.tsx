@@ -7,6 +7,7 @@ import {
   onIdTokenChanged,
   signInWithEmailAndPassword,
   signInWithPopup,
+  signInWithRedirect,
   signOut as fbSignOut,
   updateProfile,
   type User,
@@ -67,7 +68,19 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         }
       },
       async signInWithGoogle() {
-        await signInWithPopup(firebaseAuth, new GoogleAuthProvider())
+        const provider = new GoogleAuthProvider()
+        provider.setCustomParameters({ prompt: 'select_account' })
+        try {
+          await signInWithPopup(firebaseAuth, provider)
+          return
+        } catch (error) {
+          const code = (error as { code?: string } | null)?.code ?? ''
+          if (code.includes('popup-blocked') || code.includes('operation-not-supported-in-this-environment')) {
+            await signInWithRedirect(firebaseAuth, provider)
+            return
+          }
+          throw error
+        }
       },
       async signOut() {
         await fbSignOut(firebaseAuth)
