@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.env
+.env.local
+
+# Node
+node_modules/
+.next/
+out/
+npm-debug.log*
+
+# Demo DB & local storage
+backend/demo.db
+backend/local_store.json
+
+# Encryption key for stored connection credentials (NEVER commit)
+backend/.encryption.key
+.encryption.key
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
